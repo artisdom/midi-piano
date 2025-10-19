@@ -102,6 +102,14 @@
 
       <section class="card">
         <h2>Favorites</h2>
+        <div class="favorites-controls">
+          <button id="favorites-play-all-btn" class="secondary" disabled>
+            Play favorites
+          </button>
+          <button id="favorites-shuffle-btn" class="secondary" disabled>
+            Shuffle favorites
+          </button>
+        </div>
         <div id="favorites-list" class="favorites-list">
           <div class="empty">No favorites yet.</div>
         </div>
@@ -127,6 +135,14 @@
             </button>
           </div>
         </div>
+        <div class="playlist-playback-controls">
+          <button id="playlist-play-all-btn" class="secondary" disabled>
+            Play playlist
+          </button>
+          <button id="playlist-shuffle-btn" class="secondary" disabled>
+            Shuffle playlist
+          </button>
+        </div>
         <div class="playlist-layout">
           <div class="playlist-list" id="playlist-list">
             <div class="empty">No playlists yet.</div>
@@ -143,8 +159,10 @@
           No MIDI file selected.
         </div>
         <div class="playback-actions">
+          <button id="prev-btn" class="secondary" disabled>Prev</button>
           <button id="play-btn" disabled>Play</button>
           <button id="stop-btn" disabled class="secondary">Stop</button>
+          <button id="next-btn" class="secondary" disabled>Next</button>
         </div>
         <div class="rating-row">
           <div class="rating-control">
