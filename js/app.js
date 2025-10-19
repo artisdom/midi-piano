@@ -617,6 +617,7 @@ function createFolderBranch(node, depth) {
 }
 
 function createFileNode(node, depth) {
+  const entry = node.entry;
   const treeNode = document.createElement("div");
   treeNode.className = "tree-node file";
   treeNode.dataset.entryId = node.entryId;
@@ -639,22 +640,177 @@ function createFileNode(node, depth) {
   checkboxLabel.appendChild(checkbox);
   treeNode.appendChild(checkboxLabel);
 
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "tree-label";
-  button.textContent = node.name;
-  button.addEventListener("click", () => selectEntry(node.entry));
-  treeNode.appendChild(button);
+  const info = document.createElement("div");
+  info.className = "tree-info";
 
+  const labelButton = document.createElement("button");
+  labelButton.type = "button";
+  labelButton.className = "tree-label";
+  labelButton.textContent = node.name;
+  if (entry?.folder) {
+    labelButton.title = entry.folder;
+  }
+  labelButton.addEventListener("click", () => selectEntry(entry));
+  info.appendChild(labelButton);
+
+  const meta = document.createElement("div");
+  meta.className = "tree-meta";
+  if (entry?.folder) {
+    const folderSpan = document.createElement("span");
+    folderSpan.textContent = entry.folder;
+    meta.appendChild(folderSpan);
+  }
   const rating = getRating(node.entryId);
   if (rating > 0) {
-    const badge = document.createElement("span");
-    badge.className = "results-meta";
-    badge.textContent = "★".repeat(rating);
-    treeNode.appendChild(badge);
+    const ratingSpan = document.createElement("span");
+    ratingSpan.className = "tree-meta-rating";
+    ratingSpan.textContent = "★".repeat(rating);
+    meta.appendChild(ratingSpan);
+  }
+  if (meta.childElementCount > 0) {
+    info.appendChild(meta);
+  }
+
+  treeNode.appendChild(info);
+
+  if (entry) {
+    const actions = createTreeItemActions(entry);
+    treeNode.appendChild(actions);
   }
 
   return treeNode;
+}
+
+function createTreeItemActions(entry) {
+  const container = document.createElement("div");
+  container.className = "tree-item-actions";
+
+  const ratingControl = createRatingControl(entry.id);
+  container.appendChild(ratingControl);
+
+  const isFavorite = state.favorites.has(entry.id);
+  const favoriteBtn = createActionButton(
+    "Fav",
+    isFavorite ? "Remove from favorites" : "Add to favorites",
+    () => toggleFavorite(entry.id),
+    { toggle: true, active: isFavorite }
+  );
+  container.appendChild(favoriteBtn);
+
+  const playBtn = createActionButton(
+    "▶",
+    "Play this song",
+    async () => {
+      await selectEntry(entry);
+      updatePlaybackControls();
+      if (!ui.playBtn.disabled) {
+        state.player.play();
+      } else {
+        ui.playbackStatus.textContent = "Connect a MIDI device to play.";
+      }
+    }
+  );
+  container.appendChild(playBtn);
+
+  const activePlaylist = getPlaylistById(state.activePlaylistId);
+  const inActivePlaylist = Boolean(
+    activePlaylist?.entries?.includes(entry.id)
+  );
+  const selectionMarked = state.selectedForPlaylist.has(entry.id);
+  const playlistBtn = createActionButton(
+    activePlaylist
+      ? inActivePlaylist
+        ? "Rem"
+        : "Add"
+      : selectionMarked
+      ? "Sel"
+      : "Add",
+    activePlaylist
+      ? inActivePlaylist
+        ? `Remove from ${activePlaylist.name}`
+        : `Add to ${activePlaylist.name}`
+      : selectionMarked
+      ? "Remove from playlist selection"
+      : "Mark for playlist selection",
+    () => {
+      if (activePlaylist) {
+        if (inActivePlaylist) {
+          removeFromPlaylist(activePlaylist.id, entry.id);
+        } else {
+          addEntriesToPlaylist(activePlaylist.id, [entry.id]);
+        }
+      } else {
+        onEntrySelectionChanged(entry.id, !selectionMarked);
+      }
+    },
+    {
+      toggle: true,
+      active: activePlaylist ? inActivePlaylist : selectionMarked,
+    }
+  );
+  container.appendChild(playlistBtn);
+
+  return container;
+}
+
+function createActionButton(label, title, handler, options = {}) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "tree-action-button";
+  if (options.className) {
+    button.classList.add(options.className);
+  }
+  button.textContent = label;
+  if (title) {
+    button.title = title;
+    button.setAttribute("aria-label", title);
+  }
+  if (options.toggle) {
+    button.setAttribute("aria-pressed", options.active ? "true" : "false");
+    if (options.active) {
+      button.classList.add("active");
+    }
+  }
+  button.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    event.preventDefault();
+    try {
+      await handler(event);
+    } catch (error) {
+      console.error("Tree action failed", error);
+    }
+  });
+  return button;
+}
+
+function createRatingControl(entryId) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "tree-rating";
+  wrapper.setAttribute("role", "group");
+  wrapper.setAttribute("aria-label", "Rate this song");
+  const current = getRating(entryId);
+  for (let value = 1; value <= 5; value += 1) {
+    const star = document.createElement("button");
+    star.type = "button";
+    star.className = "tree-rating-star";
+    if (value <= current) {
+      star.classList.add("active");
+    }
+    star.textContent = "★";
+    const label = `${value} star${value > 1 ? "s" : ""}`;
+    star.title = label;
+    star.setAttribute("aria-label", label);
+    star.setAttribute("aria-pressed", value <= current ? "true" : "false");
+    star.addEventListener("click", (event) => {
+      event.stopPropagation();
+      event.preventDefault();
+      const existing = getRating(entryId);
+      const next = existing === value ? 0 : value;
+      setRating(entryId, next);
+    });
+    wrapper.appendChild(star);
+  }
+  return wrapper;
 }
 
 function toggleFolder(folderId) {
@@ -849,6 +1005,9 @@ function onEntrySelectionChanged(entryId, selected) {
   }
   updatePlaylistControls();
   renderPlaylistDetail();
+  renderLibraryTree();
+  renderUploadsList();
+  renderSearchResults();
 }
 
 function clearSelectedForPlaylist() {
@@ -923,6 +1082,9 @@ function toggleFavorite(entryId) {
   persistFavorites();
   updateFavoriteButton();
   renderFavoritesList();
+  renderLibraryTree();
+  renderUploadsList();
+  renderSearchResults();
 }
 
 function updateFavoriteButton() {
@@ -1221,6 +1383,9 @@ function addEntriesToPlaylist(playlistId, entryIds) {
     persistPlaylists();
     renderPlaylistList();
     renderPlaylistDetail();
+    renderLibraryTree();
+    renderUploadsList();
+    renderSearchResults();
   }
 }
 
@@ -1256,6 +1421,9 @@ function removeFromPlaylist(playlistId, entryId) {
   persistPlaylists();
   renderPlaylistList();
   renderPlaylistDetail();
+  renderLibraryTree();
+  renderUploadsList();
+  renderSearchResults();
 }
 
 function getPlaylistById(id) {
