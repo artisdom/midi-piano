@@ -59,7 +59,37 @@
         </div>
 
         <div id="library" class="library" aria-live="polite">
-          <div class="empty">Fetching built-in library…</div>
+          <div class="library-layout">
+            <section class="library-tree-section">
+              <div class="library-tree-header">
+                <h3>Built-in library</h3>
+                <div class="tree-actions">
+                  <button id="expand-library-btn" class="tiny secondary">
+                    Expand all
+                  </button>
+                  <button id="collapse-library-btn" class="tiny secondary">
+                    Collapse all
+                  </button>
+                </div>
+              </div>
+              <div
+                id="library-tree"
+                class="library-tree"
+                role="tree"
+                aria-label="Built-in library"
+              ></div>
+            </section>
+            <section class="library-results-section">
+              <h3>Search results</h3>
+              <div id="search-results" class="results-list">
+                <div class="empty">Fetching built-in library…</div>
+              </div>
+              <h3>Uploads</h3>
+              <div id="upload-list" class="results-list">
+                <div class="empty">No uploads yet.</div>
+              </div>
+            </section>
+          </div>
         </div>
 
         <hr />
@@ -71,6 +101,43 @@
       </section>
 
       <section class="card">
+        <h2>Favorites</h2>
+        <div id="favorites-list" class="favorites-list">
+          <div class="empty">No favorites yet.</div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Playlists</h2>
+        <div class="playlist-controls">
+          <label class="field">
+            <span>Playlist name</span>
+            <input
+              type="text"
+              id="playlist-name-input"
+              placeholder="My playlist"
+            />
+          </label>
+          <div class="playlist-buttons">
+            <button id="create-playlist-btn" class="primary" disabled>
+              Create from selected
+            </button>
+            <button id="random-playlist-btn" class="secondary">
+              Random 50
+            </button>
+          </div>
+        </div>
+        <div class="playlist-layout">
+          <div class="playlist-list" id="playlist-list">
+            <div class="empty">No playlists yet.</div>
+          </div>
+          <div class="playlist-detail" id="playlist-detail">
+            Select a playlist to view its songs.
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
         <h2>Playback</h2>
         <div class="selected-file" id="selected-file">
           No MIDI file selected.
@@ -78,6 +145,24 @@
         <div class="playback-actions">
           <button id="play-btn" disabled>Play</button>
           <button id="stop-btn" disabled class="secondary">Stop</button>
+        </div>
+        <div class="rating-row">
+          <div class="rating-control">
+            <span>Rating</span>
+            <div class="rating-stars" id="rating-stars" role="radiogroup">
+              <button class="star" data-rating="1" aria-label="1 star">★</button>
+              <button class="star" data-rating="2" aria-label="2 stars">★</button>
+              <button class="star" data-rating="3" aria-label="3 stars">★</button>
+              <button class="star" data-rating="4" aria-label="4 stars">★</button>
+              <button class="star" data-rating="5" aria-label="5 stars">★</button>
+            </div>
+            <button id="clear-rating-btn" class="tiny secondary">
+              Clear rating
+            </button>
+          </div>
+          <button id="favorite-btn" class="favorite-btn secondary" disabled>
+            Add to favorites
+          </button>
         </div>
         <p class="status" id="playback-status">Load a MIDI file to begin.</p>
       </section>

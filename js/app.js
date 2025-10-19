@@ -3,6 +3,13 @@ import { Midi } from "https://esm.sh/@tonejs/midi@2.0.28";
 const BLE_MIDI_SERVICE = "03b80e5a-ede8-4b33-a751-6ce34ec4c700";
 const BLE_MIDI_CHARACTERISTIC = "7772e5db-3868-4112-a1a9-f2669d106bf3";
 const MANIFEST_URL = "assets/midi_manifest.json";
+const STORAGE_KEYS = {
+  ratings: "midiPlayer:ratings",
+  favorites: "midiPlayer:favorites",
+  playlists: "midiPlayer:playlists",
+};
+const MAX_RANDOM_PLAYLIST = 50;
+const CREATE_PLAYLIST_LABEL = "Create from selected";
 
 const ui = {
   connectionType: document.getElementById("connection-type"),
@@ -10,7 +17,6 @@ const ui = {
   midiOutputSelect: document.getElementById("midi-output-select"),
   connectBtn: document.getElementById("connect-btn"),
   connectionStatus: document.getElementById("connection-status"),
-  library: document.getElementById("library"),
   search: document.getElementById("search"),
   refreshLibraryBtn: document.getElementById("refresh-library-btn"),
   fileInput: document.getElementById("file-input"),
@@ -18,11 +24,26 @@ const ui = {
   playBtn: document.getElementById("play-btn"),
   stopBtn: document.getElementById("stop-btn"),
   playbackStatus: document.getElementById("playback-status"),
+  libraryTree: document.getElementById("library-tree"),
+  searchResults: document.getElementById("search-results"),
+  uploadList: document.getElementById("upload-list"),
+  expandLibraryBtn: document.getElementById("expand-library-btn"),
+  collapseLibraryBtn: document.getElementById("collapse-library-btn"),
+  favoritesList: document.getElementById("favorites-list"),
+  playlistNameInput: document.getElementById("playlist-name-input"),
+  createPlaylistBtn: document.getElementById("create-playlist-btn"),
+  randomPlaylistBtn: document.getElementById("random-playlist-btn"),
+  playlistList: document.getElementById("playlist-list"),
+  playlistDetail: document.getElementById("playlist-detail"),
+  ratingStars: document.getElementById("rating-stars"),
+  clearRatingBtn: document.getElementById("clear-rating-btn"),
+  favoriteBtn: document.getElementById("favorite-btn"),
 };
 
 const state = {
   manifest: [],
   filteredManifest: [],
+  libraryTree: null,
   uploads: [],
   selectedEntry: null,
   parsedMidi: null,
@@ -32,7 +53,107 @@ const state = {
   bleCharacteristic: null,
   bleWriteChain: Promise.resolve(),
   player: null,
+  ratings: {},
+  favorites: new Set(),
+  playlists: [],
+  playlistCounter: 0,
+  entryIndex: new Map(),
+  libraryExpanded: new Set(["root"]),
+  searchQuery: "",
+  selectedForPlaylist: new Set(),
+  activePlaylistId: null,
 };
+
+function loadPersistedState() {
+  try {
+    const rawRatings = localStorage.getItem(STORAGE_KEYS.ratings);
+    if (rawRatings) {
+      const parsed = JSON.parse(rawRatings);
+      if (parsed && typeof parsed === "object") {
+        state.ratings = parsed;
+      }
+    }
+  } catch (error) {
+    console.warn("Failed to load ratings", error);
+  }
+
+  try {
+    const rawFavorites = localStorage.getItem(STORAGE_KEYS.favorites);
+    if (rawFavorites) {
+      const parsed = JSON.parse(rawFavorites);
+      if (Array.isArray(parsed)) {
+        state.favorites = new Set(parsed);
+      }
+    }
+  } catch (error) {
+    console.warn("Failed to load favorites", error);
+  }
+
+  try {
+    const rawPlaylists = localStorage.getItem(STORAGE_KEYS.playlists);
+    if (rawPlaylists) {
+      const parsed = JSON.parse(rawPlaylists);
+      if (Array.isArray(parsed)) {
+        state.playlists = parsed
+          .filter(
+            (playlist) =>
+              playlist &&
+              typeof playlist.id === "string" &&
+              typeof playlist.name === "string" &&
+              Array.isArray(playlist.entries)
+          )
+          .map((playlist) => ({
+            id: playlist.id,
+            name: playlist.name,
+            entries: playlist.entries.map(String),
+            createdAt: playlist.createdAt ?? Date.now(),
+          }));
+      }
+    }
+    const maxId = state.playlists
+      .map((playlist) => {
+        const match = playlist.id.match(/pl-(\d+)/);
+        return match ? Number(match[1]) : 0;
+      })
+      .reduce((max, value) => Math.max(max, value), 0);
+    state.playlistCounter = maxId;
+  } catch (error) {
+    console.warn("Failed to load playlists", error);
+  }
+}
+
+function persistRatings() {
+  try {
+    localStorage.setItem(STORAGE_KEYS.ratings, JSON.stringify(state.ratings));
+  } catch (error) {
+    console.warn("Failed to persist ratings", error);
+  }
+}
+
+function persistFavorites() {
+  try {
+    localStorage.setItem(
+      STORAGE_KEYS.favorites,
+      JSON.stringify(Array.from(state.favorites))
+    );
+  } catch (error) {
+    console.warn("Failed to persist favorites", error);
+  }
+}
+
+function persistPlaylists() {
+  try {
+    const payload = state.playlists.map((playlist) => ({
+      id: playlist.id,
+      name: playlist.name,
+      entries: playlist.entries,
+      createdAt: playlist.createdAt,
+    }));
+    localStorage.setItem(STORAGE_KEYS.playlists, JSON.stringify(payload));
+  } catch (error) {
+    console.warn("Failed to persist playlists", error);
+  }
+}
 
 class MidiPlayer {
   constructor(sendFn) {
@@ -178,6 +299,7 @@ async function init() {
       ui.playbackStatus.textContent = "Playback stopped.";
     }
   });
+  loadPersistedState();
   wireUi();
   await loadLibrary();
   updatePlaybackControls();
@@ -198,6 +320,52 @@ function wireUi() {
   ui.stopBtn.addEventListener("click", () => {
     state.player.stop();
   });
+
+  ui.expandLibraryBtn?.addEventListener("click", () => expandOrCollapseLibrary(true));
+  ui.collapseLibraryBtn?.addEventListener("click", () => expandOrCollapseLibrary(false));
+
+  if (ui.ratingStars) {
+    ui.ratingButtons = Array.from(
+      ui.ratingStars.querySelectorAll("button.star")
+    );
+    ui.ratingButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        const rating = Number(button.dataset.rating);
+        if (!state.selectedEntry) {
+          return;
+        }
+        setRating(state.selectedEntry.id, rating);
+      });
+    });
+  }
+
+  ui.clearRatingBtn?.addEventListener("click", () => {
+    if (!state.selectedEntry) {
+      return;
+    }
+    setRating(state.selectedEntry.id, 0);
+  });
+
+  ui.favoriteBtn?.addEventListener("click", () => {
+    if (!state.selectedEntry) {
+      return;
+    }
+    toggleFavorite(state.selectedEntry.id);
+  });
+
+  ui.playlistNameInput?.addEventListener("input", updatePlaylistControls);
+  ui.createPlaylistBtn?.addEventListener("click", (event) => {
+    event.preventDefault();
+    createPlaylistFromSelection();
+  });
+  ui.randomPlaylistBtn?.addEventListener("click", (event) => {
+    event.preventDefault();
+    createRandomPlaylist();
+  });
+
+  updatePlaylistControls();
+  updateRatingUI();
+  updateFavoriteButton();
 }
 
 function onConnectionTypeChanged() {
@@ -327,125 +495,787 @@ async function loadLibrary(force = false) {
     return;
   }
 
-  ui.library.innerHTML = '<div class="empty">Loading…</div>';
+  if (ui.libraryTree) {
+    ui.libraryTree.innerHTML = '<div class="empty">Loading…</div>';
+  }
+  if (ui.searchResults) {
+    ui.searchResults.innerHTML = '<div class="empty">Loading library…</div>';
+  }
   try {
     const response = await fetch(`${MANIFEST_URL}?cacheBust=${Date.now()}`);
     if (!response.ok) {
       throw new Error(`Failed to fetch manifest: ${response.status}`);
     }
     const data = (await response.json()) ?? [];
+    unregisterEntriesWithPrefix("library:");
     state.manifest = data.map((path) => buildEntry("library", path));
+    state.libraryTree = buildLibraryTree(state.manifest);
+    state.libraryExpanded = new Set(["root"]);
     state.filteredManifest = [];
     renderCurrentLibraryView();
+    if (state.searchQuery) {
+      filterLibrary(state.searchQuery);
+    }
+    renderPlaylistList();
+    renderPlaylistDetail();
   } catch (error) {
     console.error(error);
-    ui.library.innerHTML =
+    ui.libraryTree.innerHTML =
+      '<div class="empty">Unable to load library.</div>';
+    ui.searchResults.innerHTML =
       '<div class="empty">Could not load MIDI library. Check console for details.</div>';
   }
 }
 
 function filterLibrary(query) {
   const trimmed = query.trim();
+  state.searchQuery = trimmed;
   if (!trimmed) {
     state.filteredManifest = [];
-    renderLibrary([...state.manifest, ...state.uploads]);
-    return;
+  } else {
+    const lower = trimmed.toLowerCase();
+    const pool = [...state.manifest, ...state.uploads];
+    state.filteredManifest = pool.filter((entry) =>
+      entry.searchText.includes(lower)
+    );
   }
-
-  const lower = trimmed.toLowerCase();
-  state.filteredManifest = [
-    ...state.manifest.filter((entry) => entry.searchText.includes(lower)),
-    ...state.uploads.filter((entry) => entry.searchText.includes(lower)),
-  ];
-  renderLibrary(state.filteredManifest);
-}
-
-function renderLibrary(entries) {
-  const libraryEntries = entries.filter((entry) => entry.source === "library");
-  const uploadEntries = entries.filter((entry) => entry.source === "upload");
-  const hasLibrary = libraryEntries.length > 0 || state.manifest.length > 0;
-  const hasUploads = uploadEntries.length > 0 || state.uploads.length > 0;
-
-  if (!entries.length) {
-    const emptyText = hasLibrary
-      ? "No songs match your search."
-      : "No MIDI files available yet.";
-    ui.library.innerHTML = `<div class="empty">${emptyText}</div>`;
-    return;
-  }
-
-  const list = document.createElement("div");
-  list.className = "library-content";
-
-  if (hasLibrary) {
-    const section = document.createElement("div");
-    section.className = "library-section";
-    section.appendChild(sectionHeading("Built-in library"));
-    const items =
-      libraryEntries.length > 0 ? libraryEntries : state.manifest;
-    section.appendChild(buildList(items));
-    list.appendChild(section);
-  }
-
-  if (hasUploads) {
-    const section = document.createElement("div");
-    section.className = "library-section";
-    section.appendChild(sectionHeading("Uploads"));
-    const items =
-      uploadEntries.length > 0 ? uploadEntries : state.uploads;
-    section.appendChild(buildList(items));
-    list.appendChild(section);
-  }
-
-  ui.library.innerHTML = "";
-  ui.library.appendChild(list);
+  renderSearchResults();
 }
 
 function renderCurrentLibraryView() {
-  const query = ui.search.value.trim();
-  if (query) {
-    filterLibrary(query);
+  renderLibraryTree();
+  renderUploadsList();
+  renderSearchResults();
+  renderFavoritesList();
+  updatePlaylistControls();
+}
+
+function renderLibraryTree() {
+  const container = ui.libraryTree;
+  if (!container) {
+    return;
+  }
+  if (!state.libraryTree || !state.libraryTree.children.length) {
+    container.innerHTML = '<div class="empty">No MIDI files found.</div>';
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  state.libraryTree.children.forEach((child) => {
+    fragment.appendChild(createTreeBranch(child, 1));
+  });
+  container.innerHTML = "";
+  container.appendChild(fragment);
+}
+
+function createTreeBranch(node, depth) {
+  return node.type === "folder"
+    ? createFolderBranch(node, depth)
+    : createFileNode(node, depth);
+}
+
+function createFolderBranch(node, depth) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "tree-branch";
+
+  const treeNode = document.createElement("div");
+  treeNode.className = "tree-node folder";
+  treeNode.dataset.nodeId = node.id;
+  treeNode.setAttribute("role", "treeitem");
+  treeNode.setAttribute("aria-level", String(depth));
+
+  const isExpanded = state.libraryExpanded.has(node.id);
+  treeNode.setAttribute("aria-expanded", String(isExpanded));
+
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "tree-toggle";
+  toggle.innerHTML = isExpanded ? "▾" : "▸";
+  toggle.addEventListener("click", () => toggleFolder(node.id));
+  treeNode.appendChild(toggle);
+
+  const label = document.createElement("button");
+  label.type = "button";
+  label.className = "tree-label";
+  label.textContent = node.name || "(Folder)";
+  label.addEventListener("click", () => toggleFolder(node.id));
+  treeNode.appendChild(label);
+
+  wrapper.appendChild(treeNode);
+
+  if (isExpanded && node.children.length) {
+    const childrenContainer = document.createElement("div");
+    childrenContainer.className = "tree-children";
+    childrenContainer.setAttribute("role", "group");
+    node.children.forEach((child) => {
+      childrenContainer.appendChild(createTreeBranch(child, depth + 1));
+    });
+    wrapper.appendChild(childrenContainer);
+  }
+
+  return wrapper;
+}
+
+function createFileNode(node, depth) {
+  const treeNode = document.createElement("div");
+  treeNode.className = "tree-node file";
+  treeNode.dataset.entryId = node.entryId;
+  treeNode.setAttribute("role", "treeitem");
+  treeNode.setAttribute("aria-level", String(depth));
+
+  if (state.selectedEntry?.id === node.entryId) {
+    treeNode.classList.add("active");
+  }
+
+  const checkboxLabel = document.createElement("label");
+  checkboxLabel.className = "tree-checkbox";
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.setAttribute("aria-label", "Select for playlist");
+  checkbox.checked = state.selectedForPlaylist.has(node.entryId);
+  checkbox.addEventListener("change", (event) =>
+    onEntrySelectionChanged(node.entryId, event.target.checked)
+  );
+  checkboxLabel.appendChild(checkbox);
+  treeNode.appendChild(checkboxLabel);
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "tree-label";
+  button.textContent = node.name;
+  button.addEventListener("click", () => selectEntry(node.entry));
+  treeNode.appendChild(button);
+
+  const rating = getRating(node.entryId);
+  if (rating > 0) {
+    const badge = document.createElement("span");
+    badge.className = "results-meta";
+    badge.textContent = "★".repeat(rating);
+    treeNode.appendChild(badge);
+  }
+
+  return treeNode;
+}
+
+function toggleFolder(folderId) {
+  if (state.libraryExpanded.has(folderId)) {
+    if (folderId !== "root") {
+      state.libraryExpanded.delete(folderId);
+    }
   } else {
-    renderLibrary([...state.manifest, ...state.uploads]);
+    state.libraryExpanded.add(folderId);
+  }
+  renderLibraryTree();
+}
+
+function expandOrCollapseLibrary(expand) {
+  if (!state.libraryTree) {
+    return;
+  }
+  if (expand) {
+    const ids = new Set();
+    collectFolderIds(state.libraryTree, ids);
+    state.libraryExpanded = ids;
+  } else {
+    state.libraryExpanded = new Set(["root"]);
+  }
+  renderLibraryTree();
+}
+
+function collectFolderIds(node, set) {
+  if (node.type === "folder") {
+    set.add(node.id);
+    node.children.forEach((child) => collectFolderIds(child, set));
   }
 }
 
-function sectionHeading(title) {
-  const div = document.createElement("div");
-  div.className = "section-title";
-  div.textContent = title;
-  return div;
-}
+function renderUploadsList() {
+  const container = ui.uploadList;
+  if (!container) {
+    return;
+  }
+  if (!state.uploads.length) {
+    container.innerHTML = '<div class="empty">No uploads yet.</div>';
+    return;
+  }
 
-function buildList(entries) {
   const ul = document.createElement("ul");
-  if (!entries.length) {
-    const empty = document.createElement("li");
-    empty.className = "empty";
-    empty.textContent = "No files.";
-    ul.appendChild(empty);
-    return ul;
+  state.uploads.forEach((entry) => {
+    ul.appendChild(
+      createSelectableListItem(entry, { showFolder: false, selectable: true })
+    );
+  });
+  container.innerHTML = "";
+  container.appendChild(ul);
+}
+
+function renderSearchResults() {
+  const container = ui.searchResults;
+  if (!container) {
+    return;
+  }
+  if (!state.libraryTree) {
+    container.innerHTML = '<div class="empty">Loading library…</div>';
+    return;
   }
 
-  for (const entry of entries) {
+  if (!state.searchQuery) {
+    container.innerHTML =
+      '<div class="empty">Enter a search term to filter songs.</div>';
+    return;
+  }
+
+  if (!state.filteredManifest.length) {
+    container.innerHTML = `<div class="empty">No songs matched “${escapeHtml(
+      state.searchQuery
+    )}”.</div>`;
+    return;
+  }
+
+  const ul = document.createElement("ul");
+  state.filteredManifest.forEach((entry) => {
+    ul.appendChild(
+      createSelectableListItem(entry, { showFolder: true, selectable: true })
+    );
+  });
+  container.innerHTML = "";
+  container.appendChild(ul);
+}
+
+function renderFavoritesList() {
+  const container = ui.favoritesList;
+  if (!container) {
+    return;
+  }
+  const missing = [];
+  const favorites = [];
+  state.favorites.forEach((id) => {
+    const entry = getEntryById(id);
+    if (entry) {
+      favorites.push(entry);
+    } else {
+      missing.push(id);
+    }
+  });
+
+  if (missing.length) {
+    missing.forEach((id) => state.favorites.delete(id));
+    persistFavorites();
+  }
+
+  if (!favorites.length) {
+    container.innerHTML = '<div class="empty">No favorites yet.</div>';
+    return;
+  }
+
+  favorites.sort((a, b) => {
+    const ratingDiff = getRating(b.id) - getRating(a.id);
+    if (ratingDiff !== 0) {
+      return ratingDiff;
+    }
+    return a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
+  });
+
+  const ul = document.createElement("ul");
+  favorites.forEach((entry) => {
     const li = document.createElement("li");
     const button = document.createElement("button");
     button.type = "button";
-    button.dataset.entryId = entry.id;
-    button.innerHTML = `<strong>${escapeHtml(entry.title)}</strong><br /><span>${escapeHtml(entry.folder || "Root")}</span>`;
-
+    button.innerHTML = `<strong>${escapeHtml(entry.title)}</strong><br /><span>${escapeHtml(
+      entry.folder || ""
+    )}</span>`;
     if (state.selectedEntry?.id === entry.id) {
       button.classList.add("active");
     }
-
-    button.addEventListener("click", () => {
-      selectEntry(entry);
-    });
-
+    button.addEventListener("click", () => selectEntry(entry));
     li.appendChild(button);
     ul.appendChild(li);
+  });
+  container.innerHTML = "";
+  container.appendChild(ul);
+}
+
+function createSelectableListItem(entry, options = {}) {
+  const { showFolder = true, selectable = true } = options;
+  const li = document.createElement("li");
+  const row = document.createElement("div");
+  row.className = "result-item";
+
+  if (selectable) {
+    const checkboxLabel = document.createElement("label");
+    checkboxLabel.className = "tree-checkbox";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.setAttribute("aria-label", "Select for playlist");
+    checkbox.checked = state.selectedForPlaylist.has(entry.id);
+    checkbox.addEventListener("change", (event) =>
+      onEntrySelectionChanged(entry.id, event.target.checked)
+    );
+    checkboxLabel.appendChild(checkbox);
+    row.appendChild(checkboxLabel);
   }
-  return ul;
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "result-button";
+  button.innerHTML = `<strong>${escapeHtml(entry.title)}</strong>${
+    showFolder && entry.folder
+      ? `<br /><span class="results-meta">${escapeHtml(entry.folder)}</span>`
+      : ""
+  }`;
+  if (state.selectedEntry?.id === entry.id) {
+    button.classList.add("active");
+  }
+  button.addEventListener("click", () => selectEntry(entry));
+  row.appendChild(button);
+
+  const rating = getRating(entry.id);
+  if (rating > 0) {
+    const badge = document.createElement("span");
+    badge.className = "results-meta";
+    badge.textContent = "★".repeat(rating);
+    row.appendChild(badge);
+  }
+
+  li.appendChild(row);
+  return li;
+}
+
+function onEntrySelectionChanged(entryId, selected) {
+  if (selected) {
+    state.selectedForPlaylist.add(entryId);
+  } else {
+    state.selectedForPlaylist.delete(entryId);
+  }
+  updatePlaylistControls();
+  renderPlaylistDetail();
+}
+
+function clearSelectedForPlaylist() {
+  state.selectedForPlaylist.clear();
+  renderLibraryTree();
+  renderUploadsList();
+  renderSearchResults();
+  updatePlaylistControls();
+  renderPlaylistDetail();
+}
+
+function updatePlaylistControls() {
+  const selectionCount = state.selectedForPlaylist.size;
+  if (ui.createPlaylistBtn) {
+    ui.createPlaylistBtn.disabled = selectionCount === 0;
+    ui.createPlaylistBtn.textContent =
+      selectionCount === 0
+        ? CREATE_PLAYLIST_LABEL
+        : `${CREATE_PLAYLIST_LABEL} (${selectionCount})`;
+  }
+
+  if (ui.randomPlaylistBtn) {
+    const total = state.manifest.length + state.uploads.length;
+    ui.randomPlaylistBtn.disabled = total === 0;
+  }
+}
+
+function getRating(entryId) {
+  return Number(state.ratings[entryId] ?? 0);
+}
+
+function setRating(entryId, rating) {
+  const clamped = Math.max(0, Math.min(5, Math.round(rating)));
+  if (clamped <= 0) {
+    delete state.ratings[entryId];
+  } else {
+    state.ratings[entryId] = clamped;
+  }
+  persistRatings();
+  updateRatingUI();
+  renderLibraryTree();
+  renderUploadsList();
+  renderSearchResults();
+  renderFavoritesList();
+  renderPlaylistDetail();
+}
+
+function updateRatingUI() {
+  if (!ui.ratingButtons) {
+    return;
+  }
+  const entryId = state.selectedEntry?.id;
+  const rating = entryId ? getRating(entryId) : 0;
+  ui.ratingButtons.forEach((button) => {
+    const value = Number(button.dataset.rating);
+    button.disabled = !entryId;
+    const active = Boolean(entryId) && value <= rating;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+  if (ui.clearRatingBtn) {
+    ui.clearRatingBtn.disabled = !entryId || rating === 0;
+  }
+}
+
+function toggleFavorite(entryId) {
+  if (state.favorites.has(entryId)) {
+    state.favorites.delete(entryId);
+  } else {
+    state.favorites.add(entryId);
+  }
+  persistFavorites();
+  updateFavoriteButton();
+  renderFavoritesList();
+}
+
+function updateFavoriteButton() {
+  if (!ui.favoriteBtn) {
+    return;
+  }
+  const entryId = state.selectedEntry?.id;
+  const isFavorite = entryId ? state.favorites.has(entryId) : false;
+  ui.favoriteBtn.disabled = !entryId;
+  ui.favoriteBtn.classList.toggle("active", isFavorite);
+  ui.favoriteBtn.textContent = isFavorite ? "Remove favorite" : "Add to favorites";
+}
+
+function createPlaylistFromSelection() {
+  const ids = Array.from(state.selectedForPlaylist).filter((id) =>
+    Boolean(getEntryById(id))
+  );
+  if (!ids.length) {
+    return;
+  }
+  const nameInput = ui.playlistNameInput?.value.trim();
+  state.playlistCounter += 1;
+  const playlist = {
+    id: `pl-${state.playlistCounter}`,
+    name: nameInput || `Playlist ${state.playlistCounter}`,
+    entries: ids.slice(),
+    createdAt: Date.now(),
+  };
+  state.playlists.push(playlist);
+  persistPlaylists();
+  if (ui.playlistNameInput) {
+    ui.playlistNameInput.value = "";
+  }
+  clearSelectedForPlaylist();
+  setActivePlaylist(playlist.id);
+}
+
+function createRandomPlaylist() {
+  const pool = getAllEntries();
+  if (!pool.length) {
+    return;
+  }
+  const count = Math.min(MAX_RANDOM_PLAYLIST, pool.length);
+  const randomEntries = pickRandomEntries(pool, count);
+  state.playlistCounter += 1;
+  const playlist = {
+    id: `pl-${state.playlistCounter}`,
+    name: `Random ${count}`,
+    entries: randomEntries.map((entry) => entry.id),
+    createdAt: Date.now(),
+  };
+  state.playlists.push(playlist);
+  persistPlaylists();
+  setActivePlaylist(playlist.id);
+}
+
+function renderPlaylistList() {
+  const container = ui.playlistList;
+  if (!container) {
+    return;
+  }
+
+  if (!state.playlists.length) {
+    state.activePlaylistId = null;
+    container.innerHTML = '<div class="empty">No playlists yet.</div>';
+    if (ui.playlistDetail) {
+      ui.playlistDetail.innerHTML = "Select a playlist to view its songs.";
+    }
+    return;
+  }
+
+  if (
+    !state.activePlaylistId ||
+    !state.playlists.some((playlist) => playlist.id === state.activePlaylistId)
+  ) {
+    state.activePlaylistId = state.playlists[0].id;
+  }
+
+  const ul = document.createElement("ul");
+  state.playlists.forEach((playlist) => {
+    const li = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = `${playlist.name} (${playlist.entries.length})`;
+    if (playlist.id === state.activePlaylistId) {
+      button.classList.add("active");
+    }
+    button.addEventListener("click", () => {
+      if (state.activePlaylistId !== playlist.id) {
+        state.activePlaylistId = playlist.id;
+        renderPlaylistList();
+        renderPlaylistDetail();
+      }
+    });
+    li.appendChild(button);
+    ul.appendChild(li);
+  });
+  container.innerHTML = "";
+  container.appendChild(ul);
+}
+
+function setActivePlaylist(playlistId) {
+  state.activePlaylistId = playlistId;
+  renderPlaylistList();
+  renderPlaylistDetail();
+}
+
+function renderPlaylistDetail() {
+  const container = ui.playlistDetail;
+  if (!container) {
+    return;
+  }
+  const playlist = getPlaylistById(state.activePlaylistId);
+  if (!playlist) {
+    container.innerHTML = "Select a playlist to view its songs.";
+    return;
+  }
+
+  const entries = playlist.entries
+    .map((id) => getEntryById(id))
+    .filter(Boolean);
+  if (entries.length !== playlist.entries.length) {
+    playlist.entries = entries.map((entry) => entry.id);
+    persistPlaylists();
+    renderPlaylistList();
+  }
+
+  const wrapper = document.createElement("div");
+
+  const header = document.createElement("div");
+  header.className = "playlist-detail-header";
+  const title = document.createElement("h3");
+  title.textContent = `${playlist.name} (${playlist.entries.length})`;
+  header.appendChild(title);
+
+  const actions = document.createElement("div");
+  actions.className = "playlist-actions";
+
+  const renameBtn = document.createElement("button");
+  renameBtn.type = "button";
+  renameBtn.className = "tiny secondary";
+  renameBtn.textContent = "Rename";
+  renameBtn.addEventListener("click", () => renamePlaylist(playlist.id));
+  actions.appendChild(renameBtn);
+
+  const deleteBtn = document.createElement("button");
+  deleteBtn.type = "button";
+  deleteBtn.className = "tiny secondary";
+  deleteBtn.textContent = "Delete";
+  deleteBtn.addEventListener("click", () => deletePlaylist(playlist.id));
+  actions.appendChild(deleteBtn);
+
+  const addCurrentBtn = document.createElement("button");
+  addCurrentBtn.type = "button";
+  addCurrentBtn.className = "tiny secondary";
+  addCurrentBtn.textContent = "Add current";
+  addCurrentBtn.disabled = !state.selectedEntry;
+  addCurrentBtn.addEventListener("click", () => {
+    if (state.selectedEntry) {
+      addEntriesToPlaylist(playlist.id, [state.selectedEntry.id]);
+    }
+  });
+  actions.appendChild(addCurrentBtn);
+
+  const addSelectionBtn = document.createElement("button");
+  addSelectionBtn.type = "button";
+  addSelectionBtn.className = "tiny secondary";
+  addSelectionBtn.textContent = "Add selected";
+  addSelectionBtn.disabled = state.selectedForPlaylist.size === 0;
+  addSelectionBtn.addEventListener("click", () => {
+    if (!state.selectedForPlaylist.size) {
+      return;
+    }
+    addEntriesToPlaylist(
+      playlist.id,
+      Array.from(state.selectedForPlaylist.values())
+    );
+    clearSelectedForPlaylist();
+  });
+  actions.appendChild(addSelectionBtn);
+
+  header.appendChild(actions);
+  wrapper.appendChild(header);
+
+  if (!entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "No songs in this playlist yet.";
+    wrapper.appendChild(empty);
+  } else {
+    const ul = document.createElement("ul");
+    entries.forEach((entry, index) => {
+      const li = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "playlist-entry";
+      button.textContent = entry.title;
+      if (state.selectedEntry?.id === entry.id) {
+        button.classList.add("active");
+      }
+      button.addEventListener("click", () => selectEntry(entry));
+      li.appendChild(button);
+
+      const controls = document.createElement("div");
+      controls.className = "playlist-actions";
+
+      const upBtn = document.createElement("button");
+      upBtn.type = "button";
+      upBtn.className = "tiny secondary";
+      upBtn.textContent = "↑";
+      upBtn.disabled = index === 0;
+      upBtn.addEventListener("click", () =>
+        movePlaylistEntry(playlist.id, entry.id, -1)
+      );
+      controls.appendChild(upBtn);
+
+      const downBtn = document.createElement("button");
+      downBtn.type = "button";
+      downBtn.className = "tiny secondary";
+      downBtn.textContent = "↓";
+      downBtn.disabled = index === entries.length - 1;
+      downBtn.addEventListener("click", () =>
+        movePlaylistEntry(playlist.id, entry.id, 1)
+      );
+      controls.appendChild(downBtn);
+
+      const removeBtn = document.createElement("button");
+      removeBtn.type = "button";
+      removeBtn.className = "tiny secondary";
+      removeBtn.textContent = "Remove";
+      removeBtn.addEventListener("click", () =>
+        removeFromPlaylist(playlist.id, entry.id)
+      );
+      controls.appendChild(removeBtn);
+
+      li.appendChild(controls);
+      ul.appendChild(li);
+    });
+    wrapper.appendChild(ul);
+  }
+
+  container.innerHTML = "";
+  container.appendChild(wrapper);
+}
+
+function renamePlaylist(playlistId) {
+  const playlist = getPlaylistById(playlistId);
+  if (!playlist) {
+    return;
+  }
+  const newName = window.prompt("Rename playlist", playlist.name);
+  if (newName && newName.trim() && newName.trim() !== playlist.name) {
+    playlist.name = newName.trim();
+    persistPlaylists();
+    renderPlaylistList();
+    renderPlaylistDetail();
+  }
+}
+
+function deletePlaylist(playlistId) {
+  const index = state.playlists.findIndex((playlist) => playlist.id === playlistId);
+  if (index === -1) {
+    return;
+  }
+  const confirmed = window.confirm("Delete this playlist?");
+  if (!confirmed) {
+    return;
+  }
+  state.playlists.splice(index, 1);
+  persistPlaylists();
+  if (state.activePlaylistId === playlistId) {
+    state.activePlaylistId = state.playlists[0]?.id ?? null;
+  }
+  renderPlaylistList();
+  renderPlaylistDetail();
+}
+
+function addEntriesToPlaylist(playlistId, entryIds) {
+  const playlist = getPlaylistById(playlistId);
+  if (!playlist || !Array.isArray(entryIds)) {
+    return;
+  }
+  const unique = new Set(playlist.entries);
+  let added = false;
+  entryIds.forEach((id) => {
+    if (!getEntryById(id)) {
+      return;
+    }
+    if (!unique.has(id)) {
+      unique.add(id);
+      playlist.entries.push(id);
+      added = true;
+    }
+  });
+  if (added) {
+    persistPlaylists();
+    renderPlaylistList();
+    renderPlaylistDetail();
+  }
+}
+
+function movePlaylistEntry(playlistId, entryId, delta) {
+  const playlist = getPlaylistById(playlistId);
+  if (!playlist) {
+    return;
+  }
+  const index = playlist.entries.indexOf(entryId);
+  if (index === -1) {
+    return;
+  }
+  const target = index + delta;
+  if (target < 0 || target >= playlist.entries.length) {
+    return;
+  }
+  const [item] = playlist.entries.splice(index, 1);
+  playlist.entries.splice(target, 0, item);
+  persistPlaylists();
+  renderPlaylistDetail();
+}
+
+function removeFromPlaylist(playlistId, entryId) {
+  const playlist = getPlaylistById(playlistId);
+  if (!playlist) {
+    return;
+  }
+  const index = playlist.entries.indexOf(entryId);
+  if (index === -1) {
+    return;
+  }
+  playlist.entries.splice(index, 1);
+  persistPlaylists();
+  renderPlaylistList();
+  renderPlaylistDetail();
+}
+
+function getPlaylistById(id) {
+  if (!id) {
+    return null;
+  }
+  return state.playlists.find((playlist) => playlist.id === id) ?? null;
+}
+
+function getAllEntries() {
+  return [...state.manifest, ...state.uploads];
+}
+
+function pickRandomEntries(entries, count) {
+  const pool = entries.slice();
+  for (let i = pool.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+  return pool.slice(0, count);
 }
 
 function buildEntry(source, pathOrFile) {
@@ -453,25 +1283,103 @@ function buildEntry(source, pathOrFile) {
     const parts = pathOrFile.split("/");
     const title = parts.pop() ?? pathOrFile;
     const folder = parts.join(" ▸ ");
-    return {
+    return registerEntry({
       id: `library:${pathOrFile}`,
       source,
       path: pathOrFile,
       title,
       folder,
       searchText: `${pathOrFile}`.toLowerCase(),
-    };
+    });
   }
 
   const file = pathOrFile;
-  return {
+  return registerEntry({
     id: `upload:${file.name}:${file.lastModified}`,
     source,
     file,
     title: file.name,
     folder: "Uploads",
     searchText: file.name.toLowerCase(),
+  });
+}
+
+function registerEntry(entry) {
+  state.entryIndex.set(entry.id, entry);
+  return entry;
+}
+
+function unregisterEntriesWithPrefix(prefix) {
+  for (const id of Array.from(state.entryIndex.keys())) {
+    if (id.startsWith(prefix)) {
+      state.entryIndex.delete(id);
+    }
+  }
+}
+
+function getEntryById(id) {
+  return state.entryIndex.get(id) ?? null;
+}
+
+function buildLibraryTree(entries) {
+  const root = {
+    id: "root",
+    name: "Built-in Library",
+    type: "folder",
+    fullPath: "",
+    children: [],
   };
+  const folderMap = new Map([["", root]]);
+
+  const ensureFolder = (fullPath, name) => {
+    if (folderMap.has(fullPath)) {
+      return folderMap.get(fullPath);
+    }
+    const node = {
+      id: `dir:${fullPath}`,
+      name,
+      type: "folder",
+      fullPath,
+      children: [],
+    };
+    folderMap.set(fullPath, node);
+    const parentPath = fullPath.includes("/")
+      ? fullPath.slice(0, fullPath.lastIndexOf("/"))
+      : "";
+    const parent = folderMap.get(parentPath) ?? root;
+    parent.children.push(node);
+    return node;
+  };
+
+  entries.forEach((entry) => {
+    const parts = entry.path.split("/");
+    const folders = parts.slice(0, -1);
+    let currentPath = "";
+    folders.forEach((segment) => {
+      currentPath = currentPath ? `${currentPath}/${segment}` : segment;
+      ensureFolder(currentPath, segment);
+    });
+    const parentPath = folders.length ? currentPath : "";
+    const parent = folderMap.get(parentPath) ?? root;
+    parent.children.push({
+      id: entry.id,
+      name: entry.title,
+      type: "file",
+      entryId: entry.id,
+      entry,
+    });
+  });
+
+  for (const node of folderMap.values()) {
+    node.children.sort((a, b) => {
+      if (a.type === b.type) {
+        return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+      }
+      return a.type === "folder" ? -1 : 1;
+    });
+  }
+
+  return root;
 }
 
 function onFileUpload(event) {
@@ -512,6 +1420,9 @@ async function selectEntry(entry) {
   }
 
   renderCurrentLibraryView(); // Refresh highlight
+  renderPlaylistDetail();
+  updateRatingUI();
+  updateFavoriteButton();
 }
 
 async function loadEntryData(entry) {
