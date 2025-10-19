@@ -73,7 +73,8 @@ button {
   border: none;
   font-weight: 600;
   padding: 0.65rem 1.3rem;
-  background: #1e5adb;
+  background: linear-gradient(135deg, #1e5adb 0%, #4c8dff 100%);
+  box-shadow: 0 6px 18px rgba(30, 90, 219, 0.28);
   color: white;
   transition: filter 0.2s ease, transform 0.2s ease;
 }
@@ -89,8 +90,8 @@ button:disabled {
 }
 
 .secondary {
-  background: transparent;
-  border: 1px solid rgba(31, 37, 47, 0.2);
+  background: rgba(255, 255, 255, 0.3);
+  border: 1px solid rgba(31, 37, 47, 0.18);
   color: #1f252f;
 }
 
@@ -365,8 +366,10 @@ button:disabled {
   text-align: left;
   padding: 0.55rem 0.6rem;
   border-radius: 8px;
-  border: none;
-  background: none;
+  border: 1px solid rgba(31, 37, 47, 0.12);
+  background: linear-gradient(140deg, rgba(255, 255, 255, 0.95), rgba(231, 239, 255, 0.95));
+  box-shadow: 0 4px 12px rgba(31, 37, 47, 0.08);
+  color: #111;
   cursor: pointer;
 }
 
