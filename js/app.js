@@ -10,6 +10,8 @@ const STORAGE_KEYS = {
 };
 const MAX_RANDOM_PLAYLIST = 50;
 const CREATE_PLAYLIST_LABEL = "Create from selected";
+const BLE_TIMESTAMP_UNITS_PER_SECOND = 8192;
+const BLE_TIMESTAMP_MAX_VALUE = 0x1fff;
 
 const ui = {
   connectionType: document.getElementById("connection-type"),
@@ -74,6 +76,12 @@ const state = {
     index: -1,
     shuffle: false,
     playlistId: null,
+  },
+  bleQueue: {
+    pending: [],
+    flushScheduled: false,
+    lastEventTime: null,
+    lastSentTime: null,
   },
 };
 
@@ -170,7 +178,7 @@ function persistPlaylists() {
 
 class MidiPlayer {
   constructor(sendFn) {
-    this.send = sendFn;
+    this.sendEvent = sendFn;
     this.events = [];
     this.duration = 0;
     this.queueIndex = 0;
@@ -186,6 +194,7 @@ class MidiPlayer {
 
   load(events, duration) {
     this.stop();
+    resetBleQueue();
     this.events = events;
     this.duration = duration ?? 0;
     this.queueIndex = 0;
@@ -234,7 +243,7 @@ class MidiPlayer {
 
   dispatch(evt) {
     try {
-      this.send(evt.message);
+      this.sendEvent(evt);
     } catch (error) {
       console.error("Failed to send MIDI message", error);
       this.stop();
@@ -268,12 +277,12 @@ class MidiPlayer {
     for (const key of this.activeNotes.keys()) {
       const [channel, note] = key.split(":").map((value) => Number(value));
       const msg = new Uint8Array([0x80 | (channel & 0x0f), note & 0x7f, 0]);
-      this.send(msg);
+      sendRawMidi(msg);
     }
     this.activeNotes.clear();
     for (const channel of this.channelsUsed) {
       const msg = new Uint8Array([0xb0 | (channel & 0x0f), 123, 0]);
-      this.send(msg);
+      sendRawMidi(msg);
     }
   }
 
@@ -301,7 +310,7 @@ class MidiPlayer {
 }
 
 async function init() {
-  state.player = new MidiPlayer(sendMessage);
+  state.player = new MidiPlayer(sendMidiEvent);
   state.player.setStateChangeHandler((status) => {
     if (status === "started") {
       ui.playbackStatus.textContent = "Playing…";
@@ -452,6 +461,7 @@ function onConnectionTypeChanged() {
   state.bleCharacteristic = null;
   state.bleDevice = null;
   state.bleWriteChain = Promise.resolve();
+  resetBleQueue();
   updatePlaybackControls();
 
   if (type === "midi") {
@@ -511,6 +521,7 @@ async function connectBluetooth() {
       state.bleDevice = null;
       state.bleCharacteristic = null;
       state.bleWriteChain = Promise.resolve();
+      resetBleQueue();
       ui.connectionStatus.textContent = "Bluetooth device disconnected.";
       updatePlaybackControls();
     });
@@ -524,6 +535,7 @@ async function connectBluetooth() {
     state.bleDevice = device;
     state.bleCharacteristic = characteristic;
     state.bleWriteChain = Promise.resolve();
+    resetBleQueue();
     ui.connectionStatus.textContent = `Connected to Bluetooth device "${device.name ?? "MIDI Device"}".`;
   } catch (error) {
     console.error(error);
@@ -2125,26 +2137,114 @@ function updatePlaybackControls() {
   }
 }
 
-function sendMessage(message) {
+function sendMidiEvent(event) {
+  if (ui.connectionType.value === "ble" && state.bleCharacteristic) {
+    queueBleEvent(event);
+  } else {
+    sendRawMidi(event.message);
+  }
+}
+
+function sendRawMidi(message) {
   if (ui.connectionType.value === "midi" && state.midiOutput) {
     state.midiOutput.send(message);
   } else if (ui.connectionType.value === "ble" && state.bleCharacteristic) {
-    const packet = new Uint8Array(message.length + 2);
-    packet[0] = 0x80; // packet header (timestamp-high, 0ms)
-    packet[1] = 0x80; // event timestamp (delta 0)
-    packet.set(message, 2);
-    const base = state.bleWriteChain ?? Promise.resolve();
-    state.bleWriteChain = base
-      .catch((error) => {
-        console.warn("Resetting BLE write queue after error", error);
-      })
-      .then(() => state.bleCharacteristic.writeValueWithoutResponse(packet));
-    state.bleWriteChain.catch((error) => {
-      console.error("BLE write failed", error);
-    });
+    sendBleImmediate(message);
   } else {
     throw new Error("No MIDI destination available.");
   }
+}
+
+function resetBleQueue() {
+  state.bleQueue.pending = [];
+  state.bleQueue.flushScheduled = false;
+  state.bleQueue.lastEventTime = null;
+  state.bleQueue.lastSentTime = 0;
+}
+
+function queueBleEvent(event) {
+  const queue = state.bleQueue;
+  const eventTime = typeof event.time === "number" ? event.time : queue.lastSentTime ?? 0;
+  const lastSent = queue.lastSentTime;
+  const referenceTime =
+    queue.pending.length > 0
+      ? queue.pending[queue.pending.length - 1].absTime
+      : lastSent != null
+      ? lastSent
+      : 0;
+  let deltaUnits = Math.round((eventTime - referenceTime) * BLE_TIMESTAMP_UNITS_PER_SECOND);
+  if (deltaUnits < 0) {
+    deltaUnits = 0;
+  }
+  if (queue.pending.length > 0 && deltaUnits > 0x7f) {
+    flushBleQueue();
+    sendBleEventWithDelta(deltaUnits, event.message);
+    queue.lastSentTime = eventTime;
+    queue.lastEventTime = null;
+    return;
+  }
+
+  queue.pending.push({
+    message: event.message,
+    absTime: eventTime,
+    delta: deltaUnits,
+  });
+  queue.lastEventTime = eventTime;
+  if (!queue.flushScheduled) {
+    queue.flushScheduled = true;
+    queueMicrotask(flushBleQueue);
+  }
+}
+
+function flushBleQueue() {
+  const queue = state.bleQueue;
+  queue.flushScheduled = false;
+  if (!queue.pending.length) {
+    return;
+  }
+  const first = queue.pending[0];
+  const timestamp = Math.min(BLE_TIMESTAMP_MAX_VALUE, first.delta);
+  const header = 0x80 | ((timestamp >> 7) & 0x3f);
+  const low = 0x80 | (timestamp & 0x7f);
+  const bytes = [header, low, ...first.message];
+  for (let i = 1; i < queue.pending.length; i += 1) {
+    const evt = queue.pending[i];
+    bytes.push(0x80 | (evt.delta & 0x7f));
+    bytes.push(...evt.message);
+  }
+  writeBlePacket(bytes);
+  queue.lastSentTime = queue.pending[queue.pending.length - 1].absTime;
+  queue.pending = [];
+  queue.lastEventTime = null;
+}
+
+function sendBleEventWithDelta(deltaUnits, message) {
+  const timestamp = Math.min(BLE_TIMESTAMP_MAX_VALUE, deltaUnits);
+  const header = 0x80 | ((timestamp >> 7) & 0x3f);
+  const low = 0x80 | (timestamp & 0x7f);
+  const bytes = [header, low, ...message];
+  writeBlePacket(bytes);
+}
+
+function sendBleImmediate(message) {
+  const bytes = [0x80, 0x80, ...message];
+  writeBlePacket(bytes);
+  const queue = state.bleQueue;
+  queue.pending = [];
+  queue.flushScheduled = false;
+}
+
+function writeBlePacket(bytes) {
+  const packet = new Uint8Array(bytes);
+  const base = state.bleWriteChain ?? Promise.resolve();
+  state.bleWriteChain = base
+    .catch((error) => {
+      console.warn("Resetting BLE write queue after error", error);
+    })
+    .then(() => state.bleCharacteristic.writeValueWithoutResponse(packet));
+  state.bleWriteChain.catch((error) => {
+    console.error("BLE write failed", error);
+  });
 }
 
 function formatDuration(seconds) {
