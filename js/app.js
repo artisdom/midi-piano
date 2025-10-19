@@ -2129,9 +2129,10 @@ function sendMessage(message) {
   if (ui.connectionType.value === "midi" && state.midiOutput) {
     state.midiOutput.send(message);
   } else if (ui.connectionType.value === "ble" && state.bleCharacteristic) {
-    const packet = new Uint8Array(message.length + 1);
-    packet[0] = 0x80;
-    packet.set(message, 1);
+    const packet = new Uint8Array(message.length + 2);
+    packet[0] = 0x80; // packet header (timestamp-high, 0ms)
+    packet[1] = 0x80; // event timestamp (delta 0)
+    packet.set(message, 2);
     const base = state.bleWriteChain ?? Promise.resolve();
     state.bleWriteChain = base
       .catch((error) => {
