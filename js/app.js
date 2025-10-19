@@ -82,6 +82,8 @@ const state = {
     flushScheduled: false,
     lastEventTime: null,
     lastSentTime: null,
+    baseTime: null,
+    baseDelta: 0,
   },
 };
 
@@ -2159,41 +2161,47 @@ function resetBleQueue() {
   state.bleQueue.pending = [];
   state.bleQueue.flushScheduled = false;
   state.bleQueue.lastEventTime = null;
-  state.bleQueue.lastSentTime = 0;
+  state.bleQueue.lastSentTime = null;
+  state.bleQueue.baseTime = null;
+  state.bleQueue.baseDelta = 0;
 }
 
 function queueBleEvent(event) {
   const queue = state.bleQueue;
-  const eventTime = typeof event.time === "number" ? event.time : queue.lastSentTime ?? 0;
-  const lastSent = queue.lastSentTime;
-  const referenceTime =
-    queue.pending.length > 0
-      ? queue.pending[queue.pending.length - 1].absTime
-      : lastSent != null
-      ? lastSent
-      : 0;
-  let deltaUnits = Math.round((eventTime - referenceTime) * BLE_TIMESTAMP_UNITS_PER_SECOND);
+  const eventTime =
+    typeof event.time === "number"
+      ? event.time
+      : queue.lastSentTime ?? performance.now() / 1000;
+  const lastSent = queue.lastSentTime ?? eventTime;
+  let deltaUnits = Math.round(
+    (eventTime - lastSent) * BLE_TIMESTAMP_UNITS_PER_SECOND
+  );
   if (deltaUnits < 0) {
     deltaUnits = 0;
   }
-  if (queue.pending.length > 0 && deltaUnits > 0x7f) {
-    flushBleQueue();
-    sendBleEventWithDelta(deltaUnits, event.message);
-    queue.lastSentTime = eventTime;
-    queue.lastEventTime = null;
+
+  if (!queue.pending.length) {
+    queue.baseTime = eventTime;
+    queue.baseDelta = Math.min(BLE_TIMESTAMP_MAX_VALUE, deltaUnits);
+    queue.pending.push({ message: event.message });
+    queue.lastEventTime = eventTime;
+    if (!queue.flushScheduled) {
+      queue.flushScheduled = true;
+      queueMicrotask(flushBleQueue);
+    }
     return;
   }
 
-  queue.pending.push({
-    message: event.message,
-    absTime: eventTime,
-    delta: deltaUnits,
-  });
-  queue.lastEventTime = eventTime;
-  if (!queue.flushScheduled) {
-    queue.flushScheduled = true;
-    queueMicrotask(flushBleQueue);
+  const baseTime = queue.baseTime ?? eventTime;
+  const sameTimestamp = Math.abs(eventTime - baseTime) < 1e-6;
+
+  if (sameTimestamp) {
+    queue.pending.push({ message: event.message });
+    return;
   }
+
+  flushBleQueue();
+  queueBleEvent(event);
 }
 
 function flushBleQueue() {
@@ -2202,28 +2210,20 @@ function flushBleQueue() {
   if (!queue.pending.length) {
     return;
   }
-  const first = queue.pending[0];
-  const timestamp = Math.min(BLE_TIMESTAMP_MAX_VALUE, first.delta);
+  const timestamp = Math.min(BLE_TIMESTAMP_MAX_VALUE, queue.baseDelta || 0);
   const header = 0x80 | ((timestamp >> 7) & 0x3f);
   const low = 0x80 | (timestamp & 0x7f);
-  const bytes = [header, low, ...first.message];
+  const bytes = [header, low, ...queue.pending[0].message];
   for (let i = 1; i < queue.pending.length; i += 1) {
-    const evt = queue.pending[i];
-    bytes.push(0x80 | (evt.delta & 0x7f));
-    bytes.push(...evt.message);
+    bytes.push(0x80);
+    bytes.push(...queue.pending[i].message);
   }
   writeBlePacket(bytes);
-  queue.lastSentTime = queue.pending[queue.pending.length - 1].absTime;
+  queue.lastSentTime = queue.baseTime;
   queue.pending = [];
   queue.lastEventTime = null;
-}
-
-function sendBleEventWithDelta(deltaUnits, message) {
-  const timestamp = Math.min(BLE_TIMESTAMP_MAX_VALUE, deltaUnits);
-  const header = 0x80 | ((timestamp >> 7) & 0x3f);
-  const low = 0x80 | (timestamp & 0x7f);
-  const bytes = [header, low, ...message];
-  writeBlePacket(bytes);
+  queue.baseTime = null;
+  queue.baseDelta = 0;
 }
 
 function sendBleImmediate(message) {
@@ -2232,6 +2232,8 @@ function sendBleImmediate(message) {
   const queue = state.bleQueue;
   queue.pending = [];
   queue.flushScheduled = false;
+  queue.baseTime = null;
+  queue.baseDelta = 0;
 }
 
 function writeBlePacket(bytes) {
