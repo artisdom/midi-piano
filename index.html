@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MIDI Piano Player</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>MIDI Piano Player</h1>
+        <p>
+          Connect your USB or Bluetooth MIDI piano, browse bundled songs, or
+          upload your own MIDI files and play them directly on the instrument.
+        </p>
+      </header>
+
+      <section class="card">
+        <h2>Connection</h2>
+        <div class="connection-form">
+          <label class="field">
+            <span>Connection type</span>
+            <select id="connection-type">
+              <option value="midi" selected>USB MIDI (Web MIDI)</option>
+              <option value="ble">Bluetooth LE (Web Bluetooth)</option>
+            </select>
+          </label>
+
+          <label class="field" id="midi-output-field">
+            <span>MIDI output</span>
+            <select id="midi-output-select">
+              <option value="">Select an output…</option>
+            </select>
+          </label>
+
+          <button id="connect-btn">Connect</button>
+        </div>
+        <p id="connection-status" role="status" class="status">
+          No device connected.
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>Select a MIDI file</h2>
+
+        <div class="file-actions">
+          <label class="field">
+            <span>Filter songs</span>
+            <input
+              type="search"
+              id="search"
+              placeholder="Search by title or folder…"
+            />
+          </label>
+          <button id="refresh-library-btn" class="secondary">
+            Refresh library
+          </button>
+        </div>
+
+        <div id="library" class="library" aria-live="polite">
+          <div class="empty">Fetching built-in library…</div>
+        </div>
+
+        <hr />
+
+        <label class="upload-label">
+          <span>Upload MIDI files</span>
+          <input type="file" id="file-input" accept=".mid,.midi" multiple />
+        </label>
+      </section>
+
+      <section class="card">
+        <h2>Playback</h2>
+        <div class="selected-file" id="selected-file">
+          No MIDI file selected.
+        </div>
+        <div class="playback-actions">
+          <button id="play-btn" disabled>Play</button>
+          <button id="stop-btn" disabled class="secondary">Stop</button>
+        </div>
+        <p class="status" id="playback-status">Load a MIDI file to begin.</p>
+      </section>
+
+      <section class="card help">
+        <h2>Tips</h2>
+        <ul>
+          <li>
+            Web MIDI requires a secure context (HTTPS or localhost) and a
+            supported browser such as Chrome or Edge.
+          </li>
+          <li>
+            Bluetooth LE MIDI support is experimental. Ensure your instrument is
+            discoverable and supports the standard BLE MIDI service.
+          </li>
+          <li>
+            Keep this tab active while playback is running for the most reliable
+            timing.
+          </li>
+        </ul>
+      </section>
+    </main>
+
+    <script type="module" src="js/app.js"></script>
+  </body>
+</html>
